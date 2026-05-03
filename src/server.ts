@@ -133,6 +133,14 @@ function isValidInviteCode(code: string): boolean {
   return /^[A-Za-z0-9]{8}$/.test(code);
 }
 
+function isValidMessageId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
+
+function getRequestDeviceId(req: express.Request): string {
+  return String(req.header('x-device-id') ?? '').trim().slice(0, 80);
+}
+
 function sanitizeAlias(alias: unknown): string {
   if (typeof alias !== 'string') return '';
   return alias.trim().replace(/\s+/g, ' ');
@@ -276,11 +284,66 @@ function touchRoom(room: Room): void {
   queueSaveRooms();
 }
 
+function isFileMessage(message: ClipboardMessage): boolean {
+  return (message.type === 'image' || message.type === 'file') && !message.revokedAt;
+}
+
+function getDownloadUrl(message: ClipboardMessage): string {
+  return `/api/files/${encodeURIComponent(message.id)}/download`;
+}
+
+function normalizeFileMessageUrl(message: ClipboardMessage): void {
+  if (!isFileMessage(message)) return;
+  message.url = getDownloadUrl(message);
+}
+
+function normalizeRoomFileMessageUrls(room: Room): void {
+  for (const message of room.messages) {
+    normalizeFileMessageUrl(message);
+  }
+}
+
+function getStoredFileName(room: Room, message: ClipboardMessage): string | undefined {
+  if (!isFileMessage(message)) return undefined;
+  if (message.fileName) return `${message.id}-${message.fileName}`;
+
+  const legacyPrefix = `/uploads/${room.key}/`;
+  if (message.url?.startsWith(legacyPrefix)) {
+    return decodeURIComponent(message.url.slice(legacyPrefix.length));
+  }
+
+  return undefined;
+}
+
+function resolveRoomFilePath(room: Room, message: ClipboardMessage): string | undefined {
+  const storedName = getStoredFileName(room, message);
+  if (!storedName) return undefined;
+
+  const roomDir = path.resolve(UPLOAD_DIR, room.key);
+  const absolute = path.resolve(roomDir, storedName);
+  if (!absolute.startsWith(`${roomDir}${path.sep}`)) return undefined;
+
+  return absolute;
+}
+
+function findFileMessage(fileId: string): { room: Room; message: ClipboardMessage; absolute: string } | undefined {
+  for (const room of rooms.values()) {
+    const message = room.messages.find((item) => item.id === fileId);
+    if (!message || !isFileMessage(message)) continue;
+
+    const absolute = resolveRoomFilePath(room, message);
+    if (!absolute) continue;
+
+    return { room, message, absolute };
+  }
+  return undefined;
+}
+
 function trimMessages(room: Room): void {
   if (room.messages.length <= MAX_MESSAGES) return;
   const removed = room.messages.splice(0, room.messages.length - MAX_MESSAGES);
   for (const message of removed) {
-    void removeFileIfAny(message);
+    void removeFileIfAny(room, message);
   }
   touchRoom(room);
 }
@@ -292,21 +355,14 @@ function getRoomStorageBytes(room: Room): number {
   }, 0);
 }
 
-async function removeFileIfAny(message: ClipboardMessage): Promise<void> {
-  if (!message.url) return;
-  const marker = '/uploads/';
-  const index = message.url.indexOf(marker);
-  if (index < 0) return;
-
-  const relative = decodeURIComponent(message.url.slice(index + marker.length));
-  const absolute = path.resolve(UPLOAD_DIR, relative);
-  if (!absolute.startsWith(UPLOAD_DIR)) return;
-
+async function removeFileIfAny(room: Room, message: ClipboardMessage): Promise<void> {
+  const absolute = resolveRoomFilePath(room, message);
+  if (!absolute) return;
   await fs.rm(absolute, { force: true }).catch(() => undefined);
 }
 
-async function removeFilesForMessages(messages: ClipboardMessage[]): Promise<void> {
-  await Promise.all(messages.map((message) => removeFileIfAny(message)));
+async function removeFilesForMessages(room: Room, messages: ClipboardMessage[]): Promise<void> {
+  await Promise.all(messages.map((message) => removeFileIfAny(room, message)));
 }
 
 function findEditableOwnMessage(room: Room, deviceId: string, messageId: string): ClipboardMessage | undefined {
@@ -346,13 +402,15 @@ async function loadRooms(): Promise<void> {
 
     for (const item of parsed) {
       if (!item || !isValidRoomKey(item.key)) continue;
-      rooms.set(item.key, {
+      const room: Room = {
         key: item.key.toLowerCase(),
         createdAt: Number(item.createdAt) || Date.now(),
         updatedAt: Number(item.updatedAt) || Date.now(),
         messages: Array.isArray(item.messages) ? item.messages : [],
         members: new Map(),
-      });
+      };
+      normalizeRoomFileMessageUrls(room);
+      rooms.set(room.key, room);
     }
 
     // 服务重启后，恢复出来的 Room 默认无人在线，因此重新启动释放计时。
@@ -369,7 +427,6 @@ async function loadRooms(): Promise<void> {
 }
 
 app.use(express.json({ limit: '256kb' }));
-app.use('/uploads', express.static(UPLOAD_DIR));
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -403,7 +460,7 @@ app.post('/api/rooms/join', (req, res) => {
 
 app.post('/api/invites', (req, res) => {
   const key = String(req.body?.roomKey ?? '').toLowerCase();
-  const deviceId = String(req.header('x-device-id') ?? '');
+  const deviceId = getRequestDeviceId(req);
   const room = rooms.get(key);
 
   if (!isValidRoomKey(key) || !room) {
@@ -444,7 +501,7 @@ app.post('/api/invites/:code/redeem', (req, res) => {
 
 app.delete('/api/invites/:code', (req, res) => {
   const code = String(req.params.code ?? '');
-  const deviceId = String(req.header('x-device-id') ?? '');
+  const deviceId = getRequestDeviceId(req);
   const invite = invites.get(code);
 
   if (!isValidInviteCode(code) || !invite) {
@@ -463,7 +520,7 @@ app.delete('/api/invites/:code', (req, res) => {
 
 app.post('/api/uploads', upload.single('file'), async (req, res) => {
   const key = String(req.body?.roomKey ?? '').toLowerCase();
-  const deviceId = String(req.header('x-device-id') ?? '');
+  const deviceId = getRequestDeviceId(req);
   const room = rooms.get(key);
 
   if (!isValidRoomKey(key) || !room) {
@@ -504,7 +561,7 @@ app.post('/api/uploads', upload.single('file'), async (req, res) => {
     fileName: safeName,
     mimeType: req.file.mimetype,
     size: req.file.size,
-    url: `/uploads/${key}/${encodeURIComponent(storedName)}`,
+    url: getDownloadUrl({ id: messageId } as ClipboardMessage),
     createdAt: Date.now(),
   };
 
@@ -513,6 +570,45 @@ app.post('/api/uploads', upload.single('file'), async (req, res) => {
   trimMessages(room);
   broadcast(room, { type: 'messageCreated', message });
   res.json({ message });
+});
+
+app.get('/api/files/:fileId/download', (req, res) => {
+  const fileId = String(req.params.fileId ?? '');
+  const deviceId = getRequestDeviceId(req);
+
+  if (!isValidMessageId(fileId)) {
+    res.status(400).json({ error: '文件请求无效' });
+    return;
+  }
+
+  if (!deviceId) {
+    res.status(401).json({ error: '设备未识别，请先进入 Room' });
+    return;
+  }
+
+  const found = findFileMessage(fileId);
+  if (!found) {
+    res.status(404).json({ error: '文件不存在或已撤回' });
+    return;
+  }
+
+  const { room, message, absolute } = found;
+  if (!room.members.has(deviceId)) {
+    res.status(403).json({ error: '请先进入对应 Room，再下载文件' });
+    return;
+  }
+
+  const fileName = message.fileName || 'file';
+  const asciiFileName = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'file';
+
+  res.setHeader('Content-Type', message.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${asciiFileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(absolute, (error) => {
+    if (error && !res.headersSent) {
+      res.status(404).json({ error: '文件读取失败' });
+    }
+  });
 });
 
 app.use('/api', (_req, res) => {
@@ -592,6 +688,7 @@ wss.on('connection', (ws, req) => {
 
     joinedRoom = room;
     room.members.set(deviceId, member);
+    normalizeRoomFileMessageUrls(room);
 
     send(ws, {
       type: 'welcome',
@@ -710,7 +807,7 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'error', message: '只能撤回自己未撤回的内容' });
         return;
       }
-      await removeFileIfAny(message);
+      await removeFileIfAny(room, message);
       message.revokedAt = Date.now();
       message.text = undefined;
       message.url = undefined;
@@ -720,7 +817,7 @@ wss.on('connection', (ws, req) => {
     }
 
     if (event.type === 'clearMessages') {
-      await removeFilesForMessages(room.messages);
+      await removeFilesForMessages(room, room.messages);
       room.messages = [];
       touchRoom(room);
       broadcast(room, { type: 'messagesCleared', messages: [] });

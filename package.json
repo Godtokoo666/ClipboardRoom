@@ -1,0 +1,29 @@
+{
+  "name": "clipboardroom",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A small single-service TypeScript clipboard room app with WebSocket, file upload, persistence and dark mode.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc -p tsconfig.json",
+    "build:client": "node scripts/build-client.mjs",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.1.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.5.5",
+    "@types/ws": "^8.5.12",
+    "esbuild": "^0.23.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

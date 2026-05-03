@@ -1,0 +1,19 @@
+services:
+  clipboardroom:
+    build:
+      context: .
+    container_name: clipboardroom
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+      ROOM_TTL_MS: 600000
+      MAX_FILE_MB: 25
+      MAX_ROOM_STORAGE_MB: 500
+      MAX_MESSAGES: 500
+      UPLOAD_DIR: uploads
+      DATA_DIR: data
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data

@@ -10,6 +10,124 @@
     <div id="app"></div>
     <script src="/app.js"></script>
     <script>
+      (() => {
+        const DEVICE_ID_KEY = "clipboardroom.deviceId";
+        const LEGACY_DEVICE_ID_KEY = "cloud-clipboard.deviceId";
+        const FILE_URL_PATTERN = /^\/(api\/files\/[^/]+\/download|uploads\/)/;
+
+        function getDeviceId() {
+          return (
+            localStorage.getItem(DEVICE_ID_KEY) ||
+            localStorage.getItem(LEGACY_DEVICE_ID_KEY) ||
+            ""
+          );
+        }
+
+        function isFileUrl(url) {
+          try {
+            const parsed = new URL(url, location.origin);
+            return parsed.origin === location.origin && FILE_URL_PATTERN.test(parsed.pathname);
+          } catch {
+            return false;
+          }
+        }
+
+        function getFileNameFromResponse(res, fallback) {
+          const disposition = res.headers.get("content-disposition") || "";
+          const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+          if (utf8Match) {
+            try {
+              return decodeURIComponent(utf8Match[1]);
+            } catch {
+              return fallback;
+            }
+          }
+          const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+          return asciiMatch ? asciiMatch[1] : fallback;
+        }
+
+        async function readError(res) {
+          try {
+            const data = await res.json();
+            return data.error || "下载失败";
+          } catch {
+            return "下载失败";
+          }
+        }
+
+        async function downloadFile(url, fallbackName) {
+          const deviceId = getDeviceId();
+          if (!deviceId) {
+            alert("设备未识别，请先进入 Room");
+            return;
+          }
+
+          const res = await fetch(url, {
+            headers: { "x-device-id": deviceId },
+          });
+          if (!res.ok) {
+            throw new Error(await readError(res));
+          }
+
+          const blob = await res.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = objectUrl;
+          a.download = getFileNameFromResponse(res, fallbackName || "file");
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objectUrl);
+        }
+
+        function normalizeFileLinks(root) {
+          root.querySelectorAll?.("a[href]").forEach((link) => {
+            if (!isFileUrl(link.href)) return;
+            link.removeAttribute("target");
+            link.setAttribute("rel", "noopener");
+            link.dataset.secureDownloadUrl = link.href;
+            link.title = "点击下载";
+          });
+
+          root.querySelectorAll?.("img[src]").forEach((img) => {
+            if (!isFileUrl(img.src)) return;
+            img.removeAttribute("src");
+            img.alt = "图片已关闭预览，请点击下载";
+            img.title = "图片已关闭预览，请点击下载";
+          });
+        }
+
+        document.addEventListener(
+          "click",
+          (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const link = target?.closest?.("a[href]");
+            if (!link || !isFileUrl(link.href)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            const fallbackName = link.getAttribute("download") || link.textContent?.trim() || "file";
+            downloadFile(link.href, fallbackName).catch((error) => {
+              alert(error instanceof Error ? error.message : "下载失败");
+            });
+          },
+          true,
+        );
+
+        const app = document.getElementById("app");
+        if (app) {
+          normalizeFileLinks(app);
+          new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+              mutation.addedNodes.forEach((node) => {
+                if (node instanceof Element) normalizeFileLinks(node);
+              });
+            }
+          }).observe(app, { childList: true, subtree: true });
+        }
+      })();
+    </script>
+    <script>
       if (
         location.hostname === "localhost" ||
         location.hostname === "127.0.0.1"

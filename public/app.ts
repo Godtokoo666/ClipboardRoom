@@ -61,7 +61,8 @@ type UploadItem = {
 type InviteCode = {
   code: string;
   link: string;
-  expiresAt: number;
+  ttlMs: number;
+  issuedAtPerf: number;
 };
 
 type AppState = {
@@ -95,6 +96,7 @@ const MAX_ALIAS_LENGTH = 24;
 const SEND_TIMEOUT_MS = 8_000;
 const RECONNECT_MAX_DELAY_MS = 10_000;
 const INVITE_CODE_PATTERN = /^[A-Za-z0-9]{8}$/;
+const INVITE_TTL_FALLBACK_MS = 2 * 60 * 1000;
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('missing #app');
 
@@ -140,7 +142,6 @@ const state: AppState = {
 
 let pingTimer: number | undefined;
 let reconnectTimer: number | undefined;
-let inviteExpiryTimer: number | undefined;
 let inviteTickTimer: number | undefined;
 let reconnectAttempts = 0;
 let finiteFieldTables: { exp: number[]; log: number[] } | undefined;
@@ -426,13 +427,6 @@ function clearReconnectTimer(): void {
   }
 }
 
-function clearInviteExpiryTimer(): void {
-  if (inviteExpiryTimer) {
-    window.clearTimeout(inviteExpiryTimer);
-    inviteExpiryTimer = undefined;
-  }
-}
-
 function clearInviteTickTimer(): void {
   if (inviteTickTimer) {
     window.clearInterval(inviteTickTimer);
@@ -441,28 +435,31 @@ function clearInviteTickTimer(): void {
 }
 
 function resetInviteState(): void {
-  clearInviteExpiryTimer();
   clearInviteTickTimer();
   state.invite = undefined;
   state.inviteLoading = false;
   state.inviteError = '';
 }
 
-function scheduleInviteExpiry(expiresAt: number): void {
-  clearInviteExpiryTimer();
-  const delay = Math.max(0, expiresAt - Date.now());
-  inviteExpiryTimer = window.setTimeout(() => {
-    if (!state.invite || state.invite.expiresAt !== expiresAt) return;
-    state.invite = undefined;
-    state.inviteError = '二维码已失效，请重新获取';
-    clearInviteTickTimer();
-    render();
-  }, delay);
+function getInviteRemainingMs(invite: InviteCode): number {
+  const elapsed = performance.now() - invite.issuedAtPerf;
+  return Math.max(0, invite.ttlMs - elapsed);
+}
 
+function getInviteSecondsLeft(invite: InviteCode): number {
+  return Math.max(0, Math.ceil(getInviteRemainingMs(invite) / 1000));
+}
+
+function startInviteCountdown(): void {
   clearInviteTickTimer();
+  if (!state.invite) return;
+
   inviteTickTimer = window.setInterval(() => {
     if (!state.showInviteQr || !state.invite) return;
     render();
+    if (getInviteRemainingMs(state.invite) <= 0) {
+      clearInviteTickTimer();
+    }
   }, 1000);
 }
 
@@ -598,7 +595,6 @@ function handleServerEvent(event: ServerEvent): void {
           : event.reason === 'expired'
             ? '二维码已失效，请重新获取'
             : '二维码已关闭，请重新获取';
-      clearInviteExpiryTimer();
       clearInviteTickTimer();
       render();
     }
@@ -838,7 +834,6 @@ async function createOneTimeInvite(): Promise<void> {
   state.invite = undefined;
   state.inviteLoading = true;
   state.inviteError = '';
-  clearInviteExpiryTimer();
   clearInviteTickTimer();
   render();
 
@@ -854,13 +849,16 @@ async function createOneTimeInvite(): Promise<void> {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '获取二维码失败');
 
+    const rawTtlMs = Number(data.ttlMs);
+    const ttlMs = Number.isFinite(rawTtlMs) && rawTtlMs > 0 ? rawTtlMs : INVITE_TTL_FALLBACK_MS;
     state.invite = {
       code: String(data.code),
       link: `${location.origin}${data.path}`,
-      expiresAt: Number(data.expiresAt),
+      ttlMs,
+      issuedAtPerf: performance.now(),
     };
     state.inviteError = '';
-    scheduleInviteExpiry(state.invite.expiresAt);
+    startInviteCountdown();
   } catch (error) {
     state.invite = undefined;
     state.inviteError = error instanceof Error ? error.message : '获取二维码失败';
@@ -1468,8 +1466,8 @@ function getFiniteFieldTables(): { exp: number[]; log: number[] } {
 }
 
 function renderInviteQrModal(): string {
-  const invite = state.invite && state.invite.expiresAt > Date.now() ? state.invite : undefined;
-  const secondsLeft = invite ? Math.max(0, Math.ceil((invite.expiresAt - Date.now()) / 1000)) : 0;
+  const invite = state.invite;
+  const secondsLeft = invite ? getInviteSecondsLeft(invite) : 0;
   return `
     <div class="modal-backdrop" role="presentation" id="inviteQrBackdrop">
       <section class="modal-panel qr-panel" role="dialog" aria-modal="true" aria-label="二维码加入">

@@ -241,13 +241,32 @@ function makeClientId(): string {
 
 function toast(message: string): void {
   state.toast = message;
-  render();
+  updateToastElement();
   window.setTimeout(() => {
     if (state.toast === message) {
       state.toast = '';
-      render();
+      updateToastElement();
     }
   }, 2400);
+}
+
+function updateToastElement(): void {
+  const existing = app.querySelector<HTMLDivElement>('.toast');
+  if (!state.toast) {
+    existing?.remove();
+    return;
+  }
+
+  if (existing) {
+    existing.textContent = state.toast;
+    return;
+  }
+
+  const container = app.querySelector('main') || app;
+  const toastEl = document.createElement('div');
+  toastEl.className = 'toast';
+  toastEl.textContent = state.toast;
+  container.appendChild(toastEl);
 }
 
 function normalizeRoomKey(key: string): string {

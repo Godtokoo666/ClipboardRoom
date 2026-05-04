@@ -32,7 +32,7 @@ type ServerEvent =
   | { type: 'messageUpdated'; message: ClipboardMessage }
   | { type: 'messageRevoked'; message: ClipboardMessage }
   | { type: 'messagesCleared'; messages: ClipboardMessage[] }
-  | { type: 'inviteInvalidated'; code: string; reason: 'used' | 'expired' | 'revoked' }
+  | { type: 'inviteInvalidated'; code: string }
   | { type: 'presence'; members: Member[] }
   | { type: 'error'; message: string }
   | { type: 'pong' };
@@ -589,12 +589,7 @@ function handleServerEvent(event: ServerEvent): void {
   if (event.type === 'inviteInvalidated') {
     if (state.invite?.code === event.code) {
       state.invite = undefined;
-      state.inviteError =
-        event.reason === 'used'
-          ? '二维码已被使用，请重新获取'
-          : event.reason === 'expired'
-            ? '二维码已失效，请重新获取'
-            : '二维码已关闭，请重新获取';
+      state.inviteError = '被使用或已过期';
       clearInviteTickTimer();
       render();
     }

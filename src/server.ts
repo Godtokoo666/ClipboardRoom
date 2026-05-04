@@ -93,7 +93,7 @@ type ServerEvent =
   | { type: 'messageUpdated'; message: ClipboardMessage }
   | { type: 'messageRevoked'; message: ClipboardMessage }
   | { type: 'messagesCleared'; messages: ClipboardMessage[] }
-  | { type: 'inviteInvalidated'; code: string; reason: 'used' | 'expired' | 'revoked' }
+  | { type: 'inviteInvalidated'; code: string }
   | { type: 'presence'; members: PublicMember[] }
   | { type: 'error'; message: string }
   | { type: 'pong' };
@@ -212,10 +212,10 @@ function createInvite(roomKey: string, createdByDeviceId: string): { code: strin
   return { code, expiresAt };
 }
 
-function notifyInviteOwner(code: string, invite: InviteCode, reason: 'used' | 'expired' | 'revoked'): void {
+function notifyInviteOwner(code: string, invite: InviteCode): void {
   const room = rooms.get(invite.roomKey);
   const owner = room?.members.get(invite.createdByDeviceId);
-  if (owner) send(owner.ws, { type: 'inviteInvalidated', code, reason });
+  if (owner) send(owner.ws, { type: 'inviteInvalidated', code });
 }
 
 function invalidateInvite(code: string, reason: 'used' | 'expired' | 'revoked'): InviteCode | undefined {
@@ -224,7 +224,7 @@ function invalidateInvite(code: string, reason: 'used' | 'expired' | 'revoked'):
 
   clearTimeout(invite.cleanupTimer);
   invites.delete(code);
-  notifyInviteOwner(code, invite, reason);
+  notifyInviteOwner(code, invite);
   return invite;
 }
 

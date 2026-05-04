@@ -589,7 +589,7 @@ function handleServerEvent(event: ServerEvent): void {
   if (event.type === 'inviteInvalidated') {
     if (state.invite?.code === event.code) {
       state.invite = undefined;
-      state.inviteError = '被使用或已过期';
+      state.inviteError = '二维码被使用或已过期，请重新获取';
       clearInviteTickTimer();
       render();
     }

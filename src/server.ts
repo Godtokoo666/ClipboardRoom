@@ -22,6 +22,7 @@ const UPLOAD_DIR = path.resolve(process.cwd(), process.env.UPLOAD_DIR ?? 'upload
 const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? 'data');
 const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');
 const PUBLIC_DIR = path.resolve(process.cwd(), 'dist/public');
+const DEVICE_COOKIE = 'clipboardroom_device';
 
 type ClipboardMessageType = 'text' | 'image' | 'file';
 
@@ -169,6 +170,23 @@ function sanitizeFileName(name: string): string {
   );
 }
 
+function readCookie(raw: string | undefined, name: string): string {
+  if (!raw) return '';
+  const pairs = raw.split(';');
+  for (const part of pairs) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return decodeURIComponent(rest.join('=') || '');
+  }
+  return '';
+}
+
+function getDeviceIdFromRequest(req: express.Request): string {
+  const headerId = String(req.header('x-device-id') ?? '').slice(0, 80);
+  if (headerId) return headerId;
+  const cookieId = readCookie(req.headers.cookie, DEVICE_COOKIE).slice(0, 80);
+  return cookieId;
+}
+
 function createRoom(): Room {
   const now = Date.now();
   const room: Room = {
@@ -280,33 +298,36 @@ function trimMessages(room: Room): void {
   if (room.messages.length <= MAX_MESSAGES) return;
   const removed = room.messages.splice(0, room.messages.length - MAX_MESSAGES);
   for (const message of removed) {
-    void removeFileIfAny(message);
+    void removeFileIfAny(room, message);
   }
   touchRoom(room);
 }
 
 function getRoomStorageBytes(room: Room): number {
   return room.messages.reduce((total, message) => {
-    if (message.revokedAt || !message.url) return total;
+    if (message.revokedAt || message.type === 'text') return total;
     return total + (message.size ?? 0);
   }, 0);
 }
 
-async function removeFileIfAny(message: ClipboardMessage): Promise<void> {
-  if (!message.url) return;
-  const marker = '/uploads/';
-  const index = message.url.indexOf(marker);
-  if (index < 0) return;
-
-  const relative = decodeURIComponent(message.url.slice(index + marker.length));
-  const absolute = path.resolve(UPLOAD_DIR, relative);
-  if (!absolute.startsWith(UPLOAD_DIR)) return;
-
-  await fs.rm(absolute, { force: true }).catch(() => undefined);
+function getStoredFilePath(roomKey: string, message: ClipboardMessage): string | undefined {
+  if (message.type === 'text' || !message.fileName) return undefined;
+  const safeName = sanitizeFileName(message.fileName);
+  const storedName = `${message.id}-${safeName}`;
+  const roomDir = path.resolve(UPLOAD_DIR, roomKey);
+  const absolute = path.resolve(roomDir, storedName);
+  if (!absolute.startsWith(`${roomDir}${path.sep}`) && absolute !== roomDir) return undefined;
+  return absolute;
 }
 
-async function removeFilesForMessages(messages: ClipboardMessage[]): Promise<void> {
-  await Promise.all(messages.map((message) => removeFileIfAny(message)));
+async function removeFileIfAny(room: Room, message: ClipboardMessage): Promise<void> {
+  const filePath = getStoredFilePath(room.key, message);
+  if (!filePath) return;
+  await fs.rm(filePath, { force: true }).catch(() => undefined);
+}
+
+async function removeFilesForMessages(room: Room, messages: ClipboardMessage[]): Promise<void> {
+  await Promise.all(messages.map((message) => removeFileIfAny(room, message)));
 }
 
 function findEditableOwnMessage(room: Room, deviceId: string, messageId: string): ClipboardMessage | undefined {
@@ -346,11 +367,17 @@ async function loadRooms(): Promise<void> {
 
     for (const item of parsed) {
       if (!item || !isValidRoomKey(item.key)) continue;
+      const messages = Array.isArray(item.messages) ? item.messages : [];
+      for (const message of messages) {
+        if (message && (message.type === 'image' || message.type === 'file')) {
+          message.url = `/api/files/${message.id}`;
+        }
+      }
       rooms.set(item.key, {
         key: item.key.toLowerCase(),
         createdAt: Number(item.createdAt) || Date.now(),
         updatedAt: Number(item.updatedAt) || Date.now(),
-        messages: Array.isArray(item.messages) ? item.messages : [],
+        messages,
         members: new Map(),
       });
     }
@@ -369,7 +396,6 @@ async function loadRooms(): Promise<void> {
 }
 
 app.use(express.json({ limit: '256kb' }));
-app.use('/uploads', express.static(UPLOAD_DIR));
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -504,7 +530,7 @@ app.post('/api/uploads', upload.single('file'), async (req, res) => {
     fileName: safeName,
     mimeType: req.file.mimetype,
     size: req.file.size,
-    url: `/uploads/${key}/${encodeURIComponent(storedName)}`,
+    url: `/api/files/${messageId}`,
     createdAt: Date.now(),
   };
 
@@ -513,6 +539,83 @@ app.post('/api/uploads', upload.single('file'), async (req, res) => {
   trimMessages(room);
   broadcast(room, { type: 'messageCreated', message });
   res.json({ message });
+});
+
+function findFileMessage(messageId: string): { room: Room; message: ClipboardMessage } | undefined {
+  for (const room of rooms.values()) {
+    const message = room.messages.find((item) => item.id === messageId);
+    if (!message || message.revokedAt) continue;
+    if (message.type !== 'image' && message.type !== 'file') continue;
+    return { room, message };
+  }
+  return undefined;
+}
+
+function setFileHeaders(res: express.Response, message: ClipboardMessage, download: boolean): void {
+  const fileName = message.fileName || 'file';
+  const safeName = fileName.replace(/[\r\n]/g, '').replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '');
+  const fallbackName = safeName.trim() || 'file';
+  const encodedName = encodeURIComponent(fileName.replace(/[\r\n]/g, ''));
+  res.setHeader('Content-Type', message.mimeType || 'application/octet-stream');
+  res.setHeader(
+    'Content-Disposition',
+    `${download ? 'attachment' : 'inline'}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
+  );
+}
+
+function getFileAccess(req: express.Request, res: express.Response): { room: Room; message: ClipboardMessage; filePath: string } | undefined {
+  const messageId = String(req.params.messageId ?? '');
+  const matched = findFileMessage(messageId);
+  if (!matched) {
+    res.status(404).json({ error: '文件不存在或已撤回' });
+    return undefined;
+  }
+
+  const deviceId = getDeviceIdFromRequest(req);
+  if (!deviceId) {
+    res.status(401).json({ error: '缺少设备信息' });
+    return undefined;
+  }
+
+  if (!matched.room.members.has(deviceId)) {
+    res.status(401).json({ error: '请先进入 Room，再访问文件' });
+    return undefined;
+  }
+
+  const filePath = getStoredFilePath(matched.room.key, matched.message);
+  if (!filePath) {
+    res.status(404).json({ error: '文件不存在或已撤回' });
+    return undefined;
+  }
+
+  return { room: matched.room, message: matched.message, filePath };
+}
+
+app.get('/api/files/:messageId/meta', (req, res) => {
+  const access = getFileAccess(req, res);
+  if (!access) return;
+  const { message } = access;
+  res.json({
+    id: message.id,
+    fileName: message.fileName,
+    mimeType: message.mimeType,
+    size: message.size,
+    type: message.type,
+  });
+});
+
+app.get('/api/files/:messageId', (req, res) => {
+  const access = getFileAccess(req, res);
+  if (!access) return;
+  setFileHeaders(res, access.message, false);
+  res.sendFile(access.filePath);
+});
+
+app.get('/api/files/:messageId/download', (req, res) => {
+  const access = getFileAccess(req, res);
+  if (!access) return;
+  setFileHeaders(res, access.message, true);
+  res.sendFile(access.filePath);
 });
 
 app.use('/api', (_req, res) => {
@@ -710,7 +813,7 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'error', message: '只能撤回自己未撤回的内容' });
         return;
       }
-      await removeFileIfAny(message);
+      await removeFileIfAny(room, message);
       message.revokedAt = Date.now();
       message.text = undefined;
       message.url = undefined;
@@ -720,7 +823,7 @@ wss.on('connection', (ws, req) => {
     }
 
     if (event.type === 'clearMessages') {
-      await removeFilesForMessages(room.messages);
+      await removeFilesForMessages(room, room.messages);
       room.messages = [];
       touchRoom(room);
       broadcast(room, { type: 'messagesCleared', messages: [] });

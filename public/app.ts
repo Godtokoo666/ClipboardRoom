@@ -82,6 +82,8 @@ type AppState = {
   textDraft: string;
   editingId: string | null;
   editingText: string;
+  imagePreviewId: string | null;
+  imagePreviewZoomed: boolean;
   showInviteQr: boolean;
   invite?: InviteCode;
   inviteLoading: boolean;
@@ -102,6 +104,8 @@ const STORAGE = {
   theme: 'clipboardroom.theme',
   roomKey: 'clipboardroom.roomKey',
 };
+
+const DEVICE_COOKIE = 'clipboardroom_device';
 
 const LEGACY_STORAGE = {
   deviceId: 'cloud-clipboard.deviceId',
@@ -126,6 +130,8 @@ const state: AppState = {
   textDraft: '',
   editingId: null,
   editingText: '',
+  imagePreviewId: null,
+  imagePreviewZoomed: false,
   showInviteQr: false,
   invite: undefined,
   inviteLoading: false,
@@ -156,6 +162,11 @@ function getOrCreateDeviceId(): string {
   const generated = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
   localStorage.setItem(STORAGE.deviceId, generated);
   return generated;
+}
+
+function syncDeviceCookie(): void {
+  const secure = location.protocol === 'https:' ? '; Secure' : '';
+  document.cookie = `${DEVICE_COOKIE}=${encodeURIComponent(state.deviceId)}; Path=/; SameSite=Lax${secure}`;
 }
 
 function getDeviceInfo(): string {
@@ -268,6 +279,14 @@ function clearLegacyKeyUrlIfNeeded(): boolean {
   return true;
 }
 
+function getFileUrl(messageId: string): string {
+  return `/api/files/${encodeURIComponent(messageId)}`;
+}
+
+function getFileDownloadUrl(messageId: string): string {
+  return `/api/files/${encodeURIComponent(messageId)}/download`;
+}
+
 async function readResponseError(res: Response, fallback: string): Promise<string> {
   try {
     const data = await res.json();
@@ -343,6 +362,8 @@ function enterRoom(roomKey: string, options: { updateUrl?: boolean; replaceUrl?:
   state.pendingTexts = [];
   state.uploads = [];
   state.self = undefined;
+  state.imagePreviewId = null;
+  state.imagePreviewZoomed = false;
   state.showInviteQr = false;
   resetInviteState();
   localStorage.setItem(STORAGE.roomKey, roomKey);
@@ -378,6 +399,8 @@ function leaveRoom(options: { updateUrl?: boolean; clearSaved?: boolean } = {}):
   state.pendingTexts = [];
   state.uploads = [];
   state.self = undefined;
+  state.imagePreviewId = null;
+  state.imagePreviewZoomed = false;
   state.showInviteQr = false;
   resetInviteState();
   state.status = 'idle';
@@ -551,6 +574,7 @@ function handleServerEvent(event: ServerEvent): void {
 
   if (event.type === 'messageUpdated' || event.type === 'messageRevoked') {
     upsertMessage(event.message);
+    ensurePreviewMessage();
     render();
     return;
   }
@@ -559,6 +583,8 @@ function handleServerEvent(event: ServerEvent): void {
     state.messages = event.messages;
     state.editingId = null;
     state.editingText = '';
+    state.imagePreviewId = null;
+    state.imagePreviewZoomed = false;
     render();
     return;
   }
@@ -583,6 +609,7 @@ function handleServerEvent(event: ServerEvent): void {
     state.members = event.members;
     state.messages = event.messages;
     reconcilePendingTextsWithMessages();
+    ensurePreviewMessage();
     render();
     return;
   }
@@ -862,8 +889,91 @@ async function closeInviteQrModal(): Promise<void> {
   if (code) await revokeInviteCode(code);
 }
 
+function findMessageById(id: string): ClipboardMessage | undefined {
+  return state.messages.find((item) => item.id === id);
+}
+
+function openImagePreview(id: string): void {
+  const message = findMessageById(id);
+  if (!message || message.revokedAt || message.type !== 'image') return;
+  state.imagePreviewId = message.id;
+  state.imagePreviewZoomed = false;
+  render();
+}
+
+function closeImagePreview(): void {
+  state.imagePreviewId = null;
+  state.imagePreviewZoomed = false;
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => undefined);
+  }
+  render();
+}
+
+function toggleImagePreviewZoom(): void {
+  if (!state.imagePreviewId) return;
+  state.imagePreviewZoomed = !state.imagePreviewZoomed;
+  render();
+}
+
+function toggleImagePreviewFullscreen(): void {
+  const panel = document.querySelector<HTMLElement>('#imagePreviewPanel');
+  if (!panel) return;
+  if (document.fullscreenElement) {
+    void document.exitFullscreen().catch(() => undefined);
+    return;
+  }
+  void panel.requestFullscreen().catch(() => undefined);
+}
+
+function ensurePreviewMessage(): void {
+  if (!state.imagePreviewId) return;
+  const message = findMessageById(state.imagePreviewId);
+  if (!message || message.revokedAt || message.type !== 'image') {
+    state.imagePreviewId = null;
+    state.imagePreviewZoomed = false;
+  }
+}
+
+function downloadMessage(id: string): void {
+  const message = findMessageById(id);
+  if (!message || message.revokedAt) return;
+  if (message.type !== 'image' && message.type !== 'file') return;
+  const link = document.createElement('a');
+  link.href = getFileDownloadUrl(message.id);
+  link.download = message.fileName || (message.type === 'image' ? 'image' : 'file');
+  link.rel = 'noreferrer';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function copyImageToClipboard(message: ClipboardMessage): Promise<void> {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    toast('当前浏览器不支持图片复制');
+    return;
+  }
+  if (!isSecureContext) {
+    toast('当前环境不支持图片复制');
+    return;
+  }
+
+  try {
+    const res = await fetch(getFileUrl(message.id), {
+      headers: { 'x-device-id': state.deviceId },
+    });
+    if (!res.ok) throw new Error('copy failed');
+    const blob = await res.blob();
+    const mimeType = message.mimeType || blob.type || 'image/png';
+    await navigator.clipboard.write([new ClipboardItem({ [mimeType]: blob })]);
+    toast('图片已复制');
+  } catch {
+    toast('复制失败，请检查浏览器剪贴板权限');
+  }
+}
+
 function copyMessage(id: string): void {
-  const message = state.messages.find((item) => item.id === id);
+  const message = findMessageById(id);
   if (!message || message.revokedAt) return;
 
   if (message.type === 'text' && message.text) {
@@ -871,9 +981,8 @@ function copyMessage(id: string): void {
     return;
   }
 
-  if (message.url) {
-    const url = `${location.origin}${message.url}`;
-    copyToClipboard(url, '已复制文件链接');
+  if (message.type === 'image') {
+    void copyImageToClipboard(message);
   }
 }
 
@@ -954,6 +1063,24 @@ function scrollToBottom(): void {
   }, 0);
 }
 
+function getMessageListScrollState(): { top: number; atBottom: boolean } | null {
+  const list = document.querySelector<HTMLDivElement>('#messageList');
+  if (!list) return null;
+  const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+  return { top: list.scrollTop, atBottom: distance <= 8 };
+}
+
+function restoreMessageListScroll(stateSnapshot: { top: number; atBottom: boolean } | null): void {
+  if (!stateSnapshot) return;
+  const list = document.querySelector<HTMLDivElement>('#messageList');
+  if (!list) return;
+  if (stateSnapshot.atBottom) {
+    list.scrollTop = list.scrollHeight;
+    return;
+  }
+  list.scrollTop = Math.min(stateSnapshot.top, Math.max(0, list.scrollHeight - list.clientHeight));
+}
+
 function autoResizeTextarea(textarea: HTMLTextAreaElement): void {
   const maxHeight = Number(textarea.dataset.maxHeight || 180);
   textarea.style.height = 'auto';
@@ -967,11 +1094,13 @@ function applyTextareaAutosize(): void {
 }
 
 function render(): void {
+  const scrollState = state.view === 'room' ? getMessageListScrollState() : null;
   document.documentElement.dataset.theme = state.theme;
   document.title = APP_NAME;
   app.innerHTML = state.view === 'home' ? renderHome() : renderRoom();
   bindEvents();
   applyTextareaAutosize();
+  restoreMessageListScroll(scrollState);
 }
 
 function renderThemeButton(): string {
@@ -1081,6 +1210,7 @@ function renderRoom(): string {
       ${state.toast ? `<div class="toast">${escapeHtml(state.toast)}</div>` : ''}
     </main>
     ${state.showInviteQr ? renderInviteQrModal() : ''}
+    ${state.imagePreviewId ? renderImagePreviewModal() : ''}
   `;
 }
 
@@ -1365,6 +1495,27 @@ function renderInviteQrModal(): string {
   `;
 }
 
+function renderImagePreviewModal(): string {
+  const message = state.imagePreviewId ? findMessageById(state.imagePreviewId) : undefined;
+  if (!message || message.type !== 'image' || message.revokedAt) return '';
+  const fileUrl = getFileUrl(message.id);
+
+  return `
+    <div class="modal-backdrop image-backdrop" role="presentation" id="imagePreviewBackdrop">
+      <section class="image-preview-panel" role="dialog" aria-modal="true" aria-label="图片预览" id="imagePreviewPanel">
+        <div class="image-preview-toolbar">
+          <button class="icon-btn" id="imagePreviewZoomBtn" aria-label="放大镜"><span class="material-symbols-rounded" aria-hidden="true">zoom_in</span></button>
+          <button class="icon-btn" id="imagePreviewFullscreenBtn" aria-label="全屏"><span class="material-symbols-rounded" aria-hidden="true">fullscreen</span></button>
+          <button class="icon-btn" id="imagePreviewCloseBtn" aria-label="关闭"><span class="material-symbols-rounded" aria-hidden="true">close</span></button>
+        </div>
+        <div class="image-preview-body ${state.imagePreviewZoomed ? 'zoomed' : ''}">
+          <img src="${fileUrl}" alt="${escapeAttr(message.fileName || 'image')}" />
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderMember(member: Member): string {
   const isSelf = member.deviceId === state.deviceId;
   return `
@@ -1391,16 +1542,30 @@ function renderMessage(message: ClipboardMessage): string {
 
   const body = state.editingId === message.id ? renderEditingBox() : renderMessageBody(message);
   const canEdit = own && message.type === 'text';
+  const actions: string[] = [];
+
+  if (message.type === 'text') {
+    actions.push(`<button data-copy="${escapeAttr(message.id)}">复制</button>`);
+    if (canEdit) actions.push(`<button data-edit="${escapeAttr(message.id)}">修改</button>`);
+  }
+
+  if (message.type === 'image') {
+    actions.push(`<button data-copy="${escapeAttr(message.id)}">复制</button>`);
+    actions.push(`<button data-download="${escapeAttr(message.id)}">下载</button>`);
+  }
+
+  if (message.type === 'file') {
+    actions.push(`<button data-download="${escapeAttr(message.id)}">下载</button>`);
+  }
+
+  if (own) actions.push(`<button data-revoke="${escapeAttr(message.id)}">撤回</button>`);
+  const actionsHtml = actions.length ? `<div class="message-actions">${actions.join('')}</div>` : '';
 
   return `
     <article class="message ${typeClass} ${own ? 'own' : ''}">
       <div class="message-meta">${meta}</div>
       <div class="bubble ${message.type === 'text' ? 'text-bubble' : ''}">${body}</div>
-      <div class="message-actions">
-        <button data-copy="${message.id}">复制</button>
-        ${canEdit ? `<button data-edit="${message.id}">修改</button>` : ''}
-        ${own ? `<button data-revoke="${message.id}">撤回</button>` : ''}
-      </div>
+      ${actionsHtml}
     </article>
   `;
 }
@@ -1410,23 +1575,27 @@ function renderMessageBody(message: ClipboardMessage): string {
     return `<pre>${escapeHtml(message.text)}</pre>`;
   }
 
-  if (message.type === 'image' && message.url) {
+  if (message.type === 'image') {
     return `
-      <a class="image-link" href="${message.url}" target="_blank" rel="noreferrer">
-        <img src="${message.url}" alt="${escapeAttr(message.fileName || 'image')}" />
-      </a>
+      <div class="file-shell image-shell" data-preview="${escapeAttr(message.id)}">
+        <img src="${getFileUrl(message.id)}" alt="${escapeAttr(message.fileName || 'image')}" />
+        <div class="file-overlay">预览</div>
+      </div>
       <div class="file-meta">${escapeHtml(message.fileName || 'image')} · ${formatSize(message.size)}</div>
     `;
   }
 
   return `
-    <a class="file-card" href="${message.url || '#'}" target="_blank" rel="noreferrer" download="${escapeAttr(message.fileName || 'file')}">
-      <span class="file-icon">FILE</span>
-      <span>
-        <strong>${escapeHtml(message.fileName || 'file')}</strong>
-        <small>${escapeHtml(message.mimeType || 'unknown')} · ${formatSize(message.size)}</small>
-      </span>
-    </a>
+    <div class="file-shell" data-download="${escapeAttr(message.id)}">
+      <div class="file-card">
+        <span class="file-icon">FILE</span>
+        <span>
+          <strong>${escapeHtml(message.fileName || 'file')}</strong>
+          <small>${escapeHtml(message.mimeType || 'unknown')} · ${formatSize(message.size)}</small>
+        </span>
+      </div>
+      <div class="file-overlay">下载文件</div>
+    </div>
   `;
 }
 
@@ -1522,6 +1691,21 @@ function bindEvents(): void {
     button.addEventListener('click', () => discardUpload(button.dataset.discardUpload || ''));
   });
 
+  document.querySelectorAll<HTMLElement>('[data-preview]').forEach((element) => {
+    element.addEventListener('click', () => openImagePreview(element.dataset.preview || ''));
+  });
+  document.querySelectorAll<HTMLElement>('[data-download]').forEach((element) => {
+    element.addEventListener('click', () => downloadMessage(element.dataset.download || ''));
+  });
+
+  document.querySelector('#imagePreviewBackdrop')?.addEventListener('click', (event) => {
+    if (event.target !== event.currentTarget) return;
+    closeImagePreview();
+  });
+  document.querySelector('#imagePreviewCloseBtn')?.addEventListener('click', closeImagePreview);
+  document.querySelector('#imagePreviewZoomBtn')?.addEventListener('click', toggleImagePreviewZoom);
+  document.querySelector('#imagePreviewFullscreenBtn')?.addEventListener('click', toggleImagePreviewFullscreen);
+
   document.querySelector('#inviteQrBackdrop')?.addEventListener('click', (event) => {
     if (event.target !== event.currentTarget) return;
     void closeInviteQrModal();
@@ -1585,6 +1769,7 @@ window.addEventListener('popstate', () => {
 });
 
 function boot(): void {
+  syncDeviceCookie();
   const inviteCode = getInviteCodeFromUrl();
   if (inviteCode) {
     void redeemInviteCode(inviteCode);

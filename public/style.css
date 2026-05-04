@@ -8,6 +8,8 @@
   --strong: #000000;
   --reverse: #ffffff;
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+  --hover-mask: rgba(255, 255, 255, 0.78);
+  --hover-mask-text: #0a0a0a;
 }
 
 :root[data-theme='dark'] {
@@ -20,6 +22,8 @@
   --strong: #ffffff;
   --reverse: #000000;
   --shadow: 0 12px 40px rgba(255, 255, 255, 0.04);
+  --hover-mask: rgba(0, 0, 0, 0.45);
+  --hover-mask-text: #ffffff;
 }
 
 * {
@@ -173,6 +177,20 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.primary-btn,
+.secondary-btn,
+.ghost-btn,
+.file-btn,
+.message-actions button,
+.upload-actions button {
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.12s ease;
+}
+
 .primary-btn {
   background: var(--strong);
   color: var(--reverse);
@@ -190,11 +208,30 @@ textarea:focus {
 }
 
 .primary-btn:hover,
+.file-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
 .secondary-btn:hover,
 .ghost-btn:hover,
-.file-btn:hover,
-.message-actions button:hover {
-  filter: invert(0.08);
+.message-actions button:hover,
+.upload-actions button:hover {
+  background: var(--soft);
+  border-color: var(--strong);
+  color: var(--text);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+}
+
+.primary-btn:active,
+.secondary-btn:active,
+.ghost-btn:active,
+.file-btn:active,
+.message-actions button:active,
+.upload-actions button:active {
+  transform: translateY(0);
+  box-shadow: none;
 }
 
 .tips {
@@ -471,17 +508,48 @@ pre {
   font-family: inherit;
 }
 
-.image-link {
+.file-shell {
+  position: relative;
   display: block;
+  max-width: 100%;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: pointer;
 }
 
-.image-link img {
+.image-shell {
+  border-radius: 12px;
+  cursor: zoom-in;
+}
+
+.file-shell img {
   display: block;
   max-width: 100%;
   max-height: 360px;
   border-radius: 12px;
   object-fit: contain;
   border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.file-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--hover-mask);
+  color: var(--hover-mask-text);
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.file-shell:hover .file-overlay {
+  opacity: 1;
 }
 
 .file-meta {
@@ -659,6 +727,91 @@ pre {
   border-radius: 24px;
   background: var(--panel);
   box-shadow: var(--shadow);
+}
+
+.image-preview-panel {
+  position: relative;
+  width: min(96vw, 1100px);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.image-preview-toolbar {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+  z-index: 40;
+}
+
+.image-preview-toolbar .icon-btn {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(0, 0, 0, 0.45);
+  color: #ffffff;
+  font-size: 0;
+  line-height: 1;
+}
+
+.material-symbols-rounded {
+  display: inline-block;
+  font-family: "Material Symbols Rounded", sans-serif;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  direction: ltr;
+  -webkit-font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+}
+
+.image-preview-body {
+  display: grid;
+  place-items: center;
+  max-height: 85vh;
+  padding: 16px;
+  overflow: auto;
+  cursor: zoom-in;
+}
+
+.image-preview-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+  transition: transform 0.18s ease;
+}
+
+.image-preview-body.zoomed {
+  cursor: zoom-out;
+}
+
+.image-preview-body.zoomed img {
+  max-width: none;
+  max-height: none;
+  transform: scale(1.6);
+}
+
+.image-preview-panel:fullscreen {
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  background: #000000;
+}
+
+.image-preview-panel:fullscreen .image-preview-body {
+  max-height: 100%;
+}
+
+.image-preview-panel:fullscreen .image-preview-body img {
+  max-height: 100%;
 }
 
 .qr-panel {
